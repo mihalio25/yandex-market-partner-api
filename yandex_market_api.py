@@ -367,12 +367,12 @@ class OfferManager:
         Returns:
             Детальная информация о товарах
         """
-        params = {"limit": limit}
+        params = {}
         if page_token:
             params["page_token"] = page_token
         
-        # Подготовка тела запроса с фильтрами
-        data = {}
+        # Подготовка тела запроса с фильтрами (всегда передаем пустое тело если нет фильтров)
+        data = {"limit": limit}
         if offer_ids:
             data["offerIds"] = offer_ids
         if statuses:

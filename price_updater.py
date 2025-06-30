@@ -11,6 +11,7 @@ from enum import Enum
 import argparse
 import csv
 import os
+import math
 
 from yandex_market_api import (
     YandexMarketClient, 
@@ -26,6 +27,7 @@ class PriceStrategy(Enum):
     FIXED_AMOUNT = "fixed_amount"  # Увеличение на фиксированную сумму
     ROUND_UP = "round_up"  # Округление до красивых цифр
     COMPETITIVE = "competitive"  # Конкурентное ценообразование
+    CUSTOM_ROUND = "custom_round"  # Специальное округление до X90
 
 
 class PriceUpdater:
@@ -81,7 +83,7 @@ class PriceUpdater:
             self.log(f"Ошибка получения информации о кампании: {e}")
             raise
     
-    def get_offers_with_prices(self, limit: int = 200) -> List[Dict]:
+    def get_offers_with_prices(self, limit: int = 500) -> List[Dict]:
         """
         Получение товаров с ценами
         
@@ -94,40 +96,80 @@ class PriceUpdater:
         try:
             self.log("Получение списка товаров...")
             
-            # Получаем товары через business API (POST запрос с пустым телом)
-            params = {"limit": limit}
-            data = {}  # Пустое тело для получения всех товаров
-            offers_response = self.client.api._make_request(
-                "POST", 
-                f"/businesses/{self.business_id}/offer-mappings", 
-                params=params, 
-                data=data
-            )
+            # Получаем товары через campaign API с пагинацией
+            all_offers = []
+            page_token = None
+            page_num = 1
             
-            offer_mappings = offers_response.get('result', {}).get('offerMappings', [])
-            self.log(f"Получено товаров: {len(offer_mappings)}")
+            while len(all_offers) < limit:
+                try:
+                    self.log(f"Загрузка страницы {page_num}...")
+                    
+                    # Вычисляем лимит для этой страницы
+                    page_limit = min(200, limit - len(all_offers))  # API позволяет максимум 200 за раз
+                    
+                    # Получаем товары текущей страницы
+                    response = self.client.offers.get_campaign_offers(
+                        campaign_id=self.campaign_id,
+                        page_token=page_token,
+                        limit=page_limit
+                    )
+                    
+                    offers = response.get('result', {}).get('offers', [])
+                    if not offers:
+                        self.log("Больше товаров не найдено")
+                        break
+                    
+                    all_offers.extend(offers)
+                    self.log(f"Найдено {len(offers)} товаров на странице {page_num}")
+                    
+                    # Проверяем наличие следующей страницы
+                    paging = response.get('result', {}).get('paging', {})
+                    page_token = paging.get('nextPageToken')
+                    
+                    if not page_token:
+                        self.log("Все страницы обработаны")
+                        break
+                    
+                    page_num += 1
+                    
+                    # Небольшая задержка между запросами
+                    time.sleep(0.1)
+                    
+                except Exception as e:
+                    self.log(f"Ошибка при получении страницы {page_num}: {e}")
+                    break
+            
+            self.log(f"Всего получено товаров: {len(all_offers)}")
             
             # Извлекаем товары с ценами
             offers_with_prices = []
-            for mapping in offer_mappings:
-                offer = mapping.get('offer', {})
+            for offer in all_offers:
+                # Проверяем наличие цены
+                price = None
+                currency = 'RUR'
                 
-                # Проверяем наличие цены (basicPrice)
-                if 'basicPrice' in offer and offer['basicPrice']:
-                    price_info = offer['basicPrice']
-                    if isinstance(price_info, dict) and 'value' in price_info:
-                        # Получаем категорию из mapping
-                        category = mapping.get('mapping', {}).get('marketCategoryName', 'Без категории')
-                        
-                        offers_with_prices.append({
-                            'shopSku': offer.get('offerId'),  # Используем offerId как SKU
-                            'name': offer.get('name', 'Без названия'),
-                            'category': category,
-                            'current_price': float(price_info['value']),
-                            'currency': price_info.get('currencyId', 'RUR'),
-                            'offer_data': offer,
-                            'mapping_data': mapping.get('mapping', {})
-                        })
+                # Проверяем campaignPrice в первую очередь
+                campaign_price = offer.get('campaignPrice', {})
+                if campaign_price.get('value'):
+                    price = float(campaign_price['value'])
+                    currency = campaign_price.get('currency', 'RUR')
+                else:
+                    # Проверяем basicPrice
+                    basic_price = offer.get('basicPrice', {})
+                    if basic_price.get('value'):
+                        price = float(basic_price['value'])
+                        currency = basic_price.get('currency', 'RUR')
+                
+                if price is not None:
+                    offers_with_prices.append({
+                        'shopSku': offer.get('offerId'),
+                        'name': offer.get('name', 'Без названия'),
+                        'category': offer.get('categoryName', 'Без категории'),
+                        'current_price': price,
+                        'currency': currency,
+                        'offer_data': offer
+                    })
             
             self.log(f"Товаров с ценами: {len(offers_with_prices)}")
             return offers_with_prices
@@ -181,6 +223,12 @@ class PriceUpdater:
             new_price = int(new_price) + 0.99 if new_price > int(new_price) else new_price
             description = f"Конкурентное увеличение на {value}%"
         
+        elif strategy == PriceStrategy.CUSTOM_ROUND:
+            # Специальное округление: увеличение на процент, затем округление до X90
+            increased_price = current_price * (1 + value / 100)
+            new_price = self._custom_round_to_90(increased_price)
+            description = f"Увеличение на {value}% с округлением до X90"
+        
         else:
             new_price = current_price
             description = "Без изменений"
@@ -195,6 +243,32 @@ class PriceUpdater:
             description += f" (ограничено максимумом {max_price})"
         
         return new_price, description
+    
+    def _custom_round_to_90(self, price: float) -> float:
+        """
+        Специальное округление цены до ближайшего значения, заканчивающегося на 90
+        
+        Логика:
+        base = floor(price / 100)
+        lower = base * 100 + 90
+        higher = (base + 1) * 100 + 90
+        
+        Выбирается ближайшее значение
+        
+        Args:
+            price: Исходная цена
+            
+        Returns:
+            Округленная цена
+        """
+        base = math.floor(price / 100)
+        lower = base * 100 + 90
+        higher = (base + 1) * 100 + 90
+        
+        if abs(price - lower) <= abs(price - higher):
+            return float(lower)
+        else:
+            return float(higher)
     
     def apply_price_filters(self, offers: List[Dict], filters: Dict) -> List[Dict]:
         """

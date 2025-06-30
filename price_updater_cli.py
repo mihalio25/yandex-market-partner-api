@@ -29,6 +29,9 @@ def main():
 
 4. Округление цен с увеличением на 5% для товаров от 500 до 5000 рублей:
    python3 price_updater_cli.py --api-key YOUR_KEY --campaign-id 12345 --strategy round_up --value 5 --min-price 500 --max-price 5000
+
+5. Увеличение цен на 8.5% с округлением до X90 (например, 1250 -> 1290):
+   python3 price_updater_cli.py --strategy custom_round --value 8.5
         """
     )
     
@@ -40,7 +43,7 @@ def main():
     parser.add_argument('--campaign', choices=['main', 'expres'],
                        help='Выбор кампании: main (основная) или expres')
     parser.add_argument('--strategy', 
-                       choices=['percentage', 'fixed_amount', 'round_up', 'competitive'], 
+                       choices=['percentage', 'fixed_amount', 'round_up', 'competitive', 'custom_round'], 
                        default='percentage', 
                        help='Стратегия увеличения цен (по умолчанию: percentage)')
     parser.add_argument('--value', type=float, required=True, 
@@ -74,8 +77,8 @@ def main():
                            help='Задержка между пакетами в секундах (по умолчанию: 1)')
     exec_group.add_argument('--dry-run', action='store_true', 
                            help='Тестовый режим (не применять изменения)')
-    exec_group.add_argument('--limit', type=int, default=200,
-                           help='Максимальное количество товаров для обработки (по умолчанию: 200)')
+    exec_group.add_argument('--limit', type=int, default=500,
+                           help='Максимальное количество товаров для обработки (по умолчанию: 500)')
     
     # Дополнительные опции
     misc_group = parser.add_argument_group('Дополнительные опции')
